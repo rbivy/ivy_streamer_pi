@@ -263,7 +263,7 @@ class QuadOakStreamerWithIMU:
         camRgb = pipeline.create(dai.node.ColorCamera)
         camRgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
         camRgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
-        camRgb.setVideoSize(1280, 720)
+        camRgb.setVideoSize(1920, 1080)  # Capture full resolution
         camRgb.setFps(self.fps)
 
         # Mono cameras

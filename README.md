@@ -214,6 +214,10 @@ sudo ufw status
 
 ## Version History
 
+- **v3.1**: RGB camera optimization for SLAM applications
+  - Implemented software scaling for RGB stream (1080p→720p)
+  - Enhanced field-of-view consistency across camera streams
+  - Added OpenCV-based scaling with full sensor utilization
 - **v3.0**: Quad-stream system with IMU sensor data integration
 - **v2.0**: Quad-stream system with depth support
 - **v1.0**: Initial triple-stream release
