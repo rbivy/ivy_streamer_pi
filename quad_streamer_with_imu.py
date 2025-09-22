@@ -8,15 +8,17 @@ import sys
 import json
 import cv2
 import numpy as np
+import struct
 
-class QuadOakStreamer:
-    def __init__(self, host='0.0.0.0', rgb_port=5000, left_port=5001, right_port=5002, depth_port=5003,
-                 rgb_width=1920, rgb_height=1080, mono_width=1280, mono_height=720, fps=30):
+class QuadOakStreamerWithIMU:
+    def __init__(self, host='0.0.0.0', rgb_port=5000, left_port=5001, right_port=5002, depth_port=5003, imu_port=5004,
+                 rgb_width=1280, rgb_height=720, mono_width=1280, mono_height=720, fps=30):
         self.host = host
         self.rgb_port = rgb_port
         self.left_port = left_port
         self.right_port = right_port
         self.depth_port = depth_port
+        self.imu_port = imu_port
         self.rgb_width = rgb_width
         self.rgb_height = rgb_height
         self.mono_width = mono_width
@@ -36,11 +38,16 @@ class QuadOakStreamer:
         self.right_server_socket = None
         self.depth_server_socket = None
 
+        # UDP socket for IMU data
+        self.imu_socket = None
+        self.imu_client_address = None
+
         # Telemetry tracking
         self.rgb_stats = {'frames_sent': 0, 'frames_dropped': 0, 'last_fps': 0}
         self.left_stats = {'frames_sent': 0, 'frames_dropped': 0, 'last_fps': 0}
         self.right_stats = {'frames_sent': 0, 'frames_dropped': 0, 'last_fps': 0}
         self.depth_stats = {'frames_sent': 0, 'frames_dropped': 0, 'last_fps': 0}
+        self.imu_stats = {'packets_sent': 0, 'last_rate': 0}
 
     def start_rgb_server(self):
         self.rgb_server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -73,6 +80,30 @@ class QuadOakStreamer:
         self.depth_server_socket.listen(5)
         print(f"Depth server listening on {self.host}:{self.depth_port}")
         threading.Thread(target=self.accept_depth_clients, daemon=True).start()
+
+    def start_imu_server(self):
+        self.imu_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.imu_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.imu_socket.bind((self.host, self.imu_port))
+        print(f"IMU UDP server listening on {self.host}:{self.imu_port}")
+        # Start thread to listen for IMU client registration
+        threading.Thread(target=self.listen_for_imu_client, daemon=True).start()
+
+    def listen_for_imu_client(self):
+        while self.running:
+            try:
+                self.imu_socket.settimeout(1.0)
+                data, addr = self.imu_socket.recvfrom(1024)
+                if data == b'REGISTER_IMU':
+                    self.imu_client_address = addr
+                    print(f"IMU client registered from {addr}")
+                    # Send acknowledgment
+                    self.imu_socket.sendto(b'IMU_ACK', addr)
+            except socket.timeout:
+                continue
+            except Exception as e:
+                if self.running:
+                    print(f"Error in IMU listener: {e}")
 
     def accept_rgb_clients(self):
         while self.running:
@@ -160,7 +191,7 @@ class QuadOakStreamer:
         depth_8bit = depth_normalized.astype(np.uint8)
         _, encoded = cv2.imencode('.jpg', depth_8bit, [cv2.IMWRITE_JPEG_QUALITY, 80])
         data = encoded.tobytes()
-        
+
         for client in clients:
             try:
                 frame_size_bytes = len(data).to_bytes(4, byteorder='big')
@@ -178,18 +209,53 @@ class QuadOakStreamer:
             except:
                 pass
 
+    def send_imu_data(self, imu_packet):
+        if self.imu_client_address and self.imu_socket:
+            try:
+                # Access accelerometer and gyroscope data
+                accelero = imu_packet.acceleroMeter
+                gyro = imu_packet.gyroscope
+
+                # Get timestamps (in microseconds from device start)
+                accelero_ts = accelero.getTimestampDevice().total_seconds()
+                gyro_ts = gyro.getTimestampDevice().total_seconds()
+
+                # Format IMU data as JSON
+                imu_dict = {
+                    'timestamp': accelero_ts,  # Use accelerometer timestamp as primary
+                    'accelerometer': {
+                        'x': accelero.x,
+                        'y': accelero.y,
+                        'z': accelero.z,
+                        'timestamp': accelero_ts
+                    },
+                    'gyroscope': {
+                        'x': gyro.x,
+                        'y': gyro.y,
+                        'z': gyro.z,
+                        'timestamp': gyro_ts
+                    }
+                }
+                json_data = json.dumps(imu_dict)
+                self.imu_socket.sendto(json_data.encode(), self.imu_client_address)
+                self.imu_stats['packets_sent'] += 1
+            except Exception as e:
+                print(f"Error sending IMU data: {e}")
+
     def run(self):
         self.running = True
         self.start_rgb_server()
         self.start_left_server()
         self.start_right_server()
         self.start_depth_server()
+        self.start_imu_server()
 
-        print(f"Setting up OAK-D Pro quad pipeline with depth:")
+        print(f"Setting up OAK-D Pro quad pipeline with depth and IMU:")
         print(f"  RGB: {self.rgb_width}x{self.rgb_height} @ {self.fps}fps")
         print(f"  Left: {self.mono_width}x{self.mono_height} @ {self.fps}fps")
         print(f"  Right: {self.mono_width}x{self.mono_height} @ {self.fps}fps")
         print(f"  Depth: {self.mono_width}x{self.mono_height} @ {self.fps}fps")
+        print(f"  IMU: Accelerometer + Gyroscope @ 100Hz")
 
         pipeline = dai.Pipeline()
 
@@ -197,7 +263,7 @@ class QuadOakStreamer:
         camRgb = pipeline.create(dai.node.ColorCamera)
         camRgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
         camRgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
-        camRgb.setVideoSize(self.rgb_width, self.rgb_height)
+        camRgb.setVideoSize(1280, 720)
         camRgb.setFps(self.fps)
 
         # Mono cameras
@@ -218,6 +284,15 @@ class QuadOakStreamer:
         stereoDepth.setSubpixel(False)
         monoLeft.out.link(stereoDepth.left)
         monoRight.out.link(stereoDepth.right)
+
+        # IMU node
+        imu = pipeline.create(dai.node.IMU)
+        # Enable accelerometer and gyroscope at 100Hz
+        imu.enableIMUSensor([dai.IMUSensor.ACCELEROMETER_RAW, dai.IMUSensor.GYROSCOPE_RAW], 100)
+        # Set batch report threshold to 1 for low latency
+        imu.setBatchReportThreshold(1)
+        # Max batch reports to 10
+        imu.setMaxBatchReports(10)
 
         # Encoders for RGB, Left, Right
         rgbEncoder = pipeline.create(dai.node.VideoEncoder)
@@ -256,18 +331,20 @@ class QuadOakStreamer:
         leftQueue = leftEncoder_built.bitstream.createOutputQueue(maxSize=1, blocking=False)
         rightQueue = rightEncoder_built.bitstream.createOutputQueue(maxSize=1, blocking=False)
         depthQueue = stereoDepth.depth.createOutputQueue(maxSize=1, blocking=False)
+        imuQueue = imu.out.createOutputQueue(maxSize=50, blocking=False)
 
         print("Starting OAK-D Pro device...")
 
         try:
             pipeline.start()
             with pipeline:
-                print("Quad streaming started. Press Ctrl+C to stop.")
-                
+                print("Quad streaming with IMU started. Press Ctrl+C to stop.")
+
                 rgb_frame_count = 0
                 left_frame_count = 0
                 right_frame_count = 0
                 depth_frame_count = 0
+                imu_packet_count = 0
                 start_time = time.time()
                 last_stats_time = start_time
 
@@ -304,6 +381,14 @@ class QuadOakStreamer:
                                 self.broadcast_depth_frame(depthFrame, self.depth_clients, self.depth_stats)
                             depth_frame_count += 1
 
+                        # IMU data stream
+                        if imuQueue.has():
+                            imuData = imuQueue.get()
+                            imuPackets = imuData.packets
+                            for imuPacket in imuPackets:
+                                self.send_imu_data(imuPacket)
+                                imu_packet_count += 1
+
                         current_time = time.time()
                         if current_time - last_stats_time >= 2.0:
                             elapsed = current_time - start_time
@@ -311,16 +396,19 @@ class QuadOakStreamer:
                             left_fps = left_frame_count / elapsed if elapsed > 0 else 0
                             right_fps = right_frame_count / elapsed if elapsed > 0 else 0
                             depth_fps = depth_frame_count / elapsed if elapsed > 0 else 0
+                            imu_rate = imu_packet_count / elapsed if elapsed > 0 else 0
 
                             self.rgb_stats['last_fps'] = rgb_fps
                             self.left_stats['last_fps'] = left_fps
                             self.right_stats['last_fps'] = right_fps
                             self.depth_stats['last_fps'] = depth_fps
+                            self.imu_stats['last_rate'] = imu_rate
 
                             print(f"RGB: {rgb_fps:.1f} fps ({len(self.rgb_clients)} clients) | "
                                   f"Left: {left_fps:.1f} fps ({len(self.left_clients)} clients) | "
                                   f"Right: {right_fps:.1f} fps ({len(self.right_clients)} clients) | "
-                                  f"Depth: {depth_fps:.1f} fps ({len(self.depth_clients)} clients)")
+                                  f"Depth: {depth_fps:.1f} fps ({len(self.depth_clients)} clients) | "
+                                  f"IMU: {imu_rate:.1f} Hz")
                             last_stats_time = current_time
 
                         else:
@@ -332,14 +420,14 @@ class QuadOakStreamer:
                         print(f"Error in streaming loop: {e}")
 
         except Exception as e:
-            print(f"Failed to start quad pipeline: {e}")
+            print(f"Failed to start quad pipeline with IMU: {e}")
             import traceback
             traceback.print_exc()
         finally:
             self.shutdown()
 
     def shutdown(self):
-        print("\nShutting down quad streamer...")
+        print("\nShutting down quad streamer with IMU...")
         self.running = False
         for clients in [self.rgb_clients, self.left_clients, self.right_clients, self.depth_clients]:
             for client in clients:
@@ -347,20 +435,20 @@ class QuadOakStreamer:
                     client.close()
                 except:
                     pass
-        for socket in [self.rgb_server_socket, self.left_server_socket, self.right_server_socket, self.depth_server_socket]:
-            if socket:
+        for socket_obj in [self.rgb_server_socket, self.left_server_socket, self.right_server_socket, self.depth_server_socket, self.imu_socket]:
+            if socket_obj:
                 try:
-                    socket.close()
+                    socket_obj.close()
                 except:
                     pass
-        print("Quad streamer stopped")
+        print("Quad streamer with IMU stopped")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='OAK-D Pro Quad Streamer with Depth')
+    parser = argparse.ArgumentParser(description='OAK-D Pro Quad Streamer with Depth and IMU')
     parser.add_argument('--fps', type=int, default=30, help='FPS (default: 30)')
     args = parser.parse_args()
 
-    streamer = QuadOakStreamer(fps=args.fps)
+    streamer = QuadOakStreamerWithIMU(fps=args.fps)
     try:
         streamer.run()
     except KeyboardInterrupt:
