@@ -11,7 +11,7 @@ import numpy as np
 import struct
 
 class QuadOakStreamerWithIMU:
-    def __init__(self, host='0.0.0.0', rgb_port=5000, left_port=5001, right_port=5002, depth_port=5003, imu_port=5004,
+    def __init__(self, host=.192.168.1.201., rgb_port=5000, left_port=5001, right_port=5002, depth_port=5003, imu_port=5004,
                  rgb_width=1280, rgb_height=720, mono_width=1280, mono_height=720, fps=30):
         self.host = host
         self.rgb_port = rgb_port
@@ -263,7 +263,7 @@ class QuadOakStreamerWithIMU:
         camRgb = pipeline.create(dai.node.ColorCamera)
         camRgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
         camRgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
-        camRgb.setVideoSize(1920, 1080)  # Capture full resolution
+        camRgb.setVideoSize(1920, 1080)  # Full 1080p output - PC scales to 720p
         camRgb.setFps(self.fps)
 
         # Mono cameras
@@ -277,8 +277,8 @@ class QuadOakStreamerWithIMU:
 
         # Depth node
         stereoDepth = pipeline.create(dai.node.StereoDepth)
-        stereoDepth.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_DETAIL)
-        stereoDepth.initialConfig.setMedianFilter(dai.MedianFilter.KERNEL_7x7)
+        stereoDepth.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_ACCURACY)
+        stereoDepth.initialConfig.setMedianFilter(dai.MedianFilter.KERNEL_5x5)
         stereoDepth.setLeftRightCheck(True)
         stereoDepth.setExtendedDisparity(False)
         stereoDepth.setSubpixel(False)
@@ -307,7 +307,7 @@ class QuadOakStreamerWithIMU:
             bitrate=rgb_bitrate_kbps * 1000,
             frameRate=self.fps,
             profile=dai.VideoEncoderProperties.Profile.H264_BASELINE,
-            keyframeFrequency=30
+            keyframeFrequency=15
         )
 
         leftEncoder_built = leftEncoder.build(
@@ -315,7 +315,7 @@ class QuadOakStreamerWithIMU:
             bitrate=mono_bitrate_kbps * 1000,
             frameRate=self.fps,
             profile=dai.VideoEncoderProperties.Profile.H264_BASELINE,
-            keyframeFrequency=30
+            keyframeFrequency=15
         )
 
         rightEncoder_built = rightEncoder.build(
@@ -323,7 +323,7 @@ class QuadOakStreamerWithIMU:
             bitrate=mono_bitrate_kbps * 1000,
             frameRate=self.fps,
             profile=dai.VideoEncoderProperties.Profile.H264_BASELINE,
-            keyframeFrequency=30
+            keyframeFrequency=15
         )
 
         # Create output queues
