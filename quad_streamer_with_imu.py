@@ -11,7 +11,7 @@ import numpy as np
 import struct
 
 class QuadOakStreamerWithIMU:
-    def __init__(self, host=.192.168.1.201., rgb_port=5000, left_port=5001, right_port=5002, depth_port=5003, imu_port=5004,
+    def __init__(self, host="192.168.1.201", rgb_port=5000, left_port=5001, right_port=5002, depth_port=5003, imu_port=5004,
                  rgb_width=1280, rgb_height=720, mono_width=1280, mono_height=720, fps=30):
         self.host = host
         self.rgb_port = rgb_port
@@ -277,7 +277,7 @@ class QuadOakStreamerWithIMU:
 
         # Depth node
         stereoDepth = pipeline.create(dai.node.StereoDepth)
-        stereoDepth.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_ACCURACY)
+        stereoDepth.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_DETAIL)
         stereoDepth.initialConfig.setMedianFilter(dai.MedianFilter.KERNEL_5x5)
         stereoDepth.setLeftRightCheck(True)
         stereoDepth.setExtendedDisparity(False)
