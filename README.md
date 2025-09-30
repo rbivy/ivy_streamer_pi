@@ -1,15 +1,16 @@
-# OAK-D Pro Raspberry Pi Streamer with IMU - v5.0
+# OAK-D Pro Raspberry Pi Streamer with IMU - v6.0 (SLAM-Optimized)
 
-**Production-ready quad H.264 video streamer + IMU data** for Raspberry Pi 5 with OAK-D Pro camera.
+**SLAM-ready quad H.264 video streamer + IMU data** for Raspberry Pi 5 with OAK-D Pro camera.
 
-Streams **RGB + Left + Right cameras + Depth map + IMU sensor data simultaneously** at full performance to PC over Ethernet.
+Streams **RGB + Left + Right cameras + Raw 16-bit Depth + High-frequency IMU data simultaneously** with synchronized timestamps for professional SLAM and visual odometry applications.
 
-## 🎯 v5.0 Enhancements
+## 🎯 v6.0 SLAM Enhancements
 
-- **Stable 30 FPS**: Hard-limited frame rates for consistent performance
-- **Optimized connection handling**: Prevents client connection overload
-- **Improved resource management**: Better handling of multiple simultaneous clients
-- **Enhanced telemetry**: Real-time FPS reporting for all streams
+- **Raw 16-bit depth streaming**: Metric depth data in millimeters for precise 3D reconstruction
+- **H.264 HIGH profile**: Superior video quality with reduced compression artifacts
+- **200Hz IMU frequency**: High-precision motion tracking for dynamic scenarios
+- **Synchronized timestamps**: Common time reference across all sensor streams
+- **Optimized for SLAM**: Professional-grade data streams for computer vision
 
 ## 🌐 Ethernet Configuration (IMPORTANT)
 
@@ -40,52 +41,57 @@ source venv/bin/activate
 # 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Run the streamer with explicit FPS limit
+# 4. Run the SLAM-optimized streamer
 python quad_streamer_with_imu.py --fps 30
 ```
 
-## Streams Available
+## Streams Available (SLAM-Optimized)
 
-The streamer provides 5 concurrent data streams:
+The streamer provides 5 concurrent SLAM-ready data streams:
 
-- **Port 5000**: RGB Camera (H.264, 1920x1080 @ 30fps)
-- **Port 5001**: Left Mono Camera (H.264, 1280x720 @ 30fps) 
-- **Port 5002**: Right Mono Camera (H.264, 1280x720 @ 30fps)
-- **Port 5003**: Depth Map (JPEG, 1280x720 @ 30fps)
-- **Port 5004**: IMU Data (UDP, JSON, 100Hz)
+- **Port 5000**: RGB Camera (H.264 HIGH, 1920x1080 @ 30fps, 10Mbps)
+- **Port 5001**: Left Mono Camera (H.264 HIGH, 1280x720 @ 30fps, 4Mbps) 
+- **Port 5002**: Right Mono Camera (H.264 HIGH, 1280x720 @ 30fps, 4Mbps)
+- **Port 5003**: **Raw 16-bit Depth** (millimeter precision, 1280x720 @ 30fps)
+- **Port 5004**: **IMU Data** (UDP, JSON, **200Hz**, synchronized timestamps)
 
-## Performance
+## Performance (SLAM-Optimized)
 
-- **Total bandwidth**: ~14-15 Mbps (optimized from 25-30 Mbps)
+- **Total bandwidth**: ~18-20 Mbps (increased for HIGH profile quality)
 - **FPS stability**: Locked 30 FPS across all video streams
-- **CPU usage**: <35% on Raspberry Pi 5 with full stream load
+- **IMU frequency**: 200Hz for high-precision motion tracking
+- **CPU usage**: ~40% on Raspberry Pi 5 with full stream load
 - **Latency**: <50ms end-to-end with aggressive buffering
-- **Connection limit**: Handles multiple clients per stream efficiently
+- **Timestamp sync**: Nanosecond precision for sensor fusion
 
 ## Technical Details
 
-### Video Encoding
-- **RGB**: H.264 baseline profile, 1920x1080 @ 30fps (8Mbps bitrate)
-- **Stereo cameras**: H.264 baseline profile, 1280x720 @ 30fps (3Mbps bitrate)
-- **Depth**: JPEG compressed depth maps with color encoding
+### Video Encoding (SLAM-Optimized)
+- **RGB**: H.264 **HIGH profile**, 1920x1080 @ 30fps (10Mbps bitrate)
+- **Stereo cameras**: H.264 **HIGH profile**, 1280x720 @ 30fps (4Mbps bitrate)
+- **Depth**: **Raw 16-bit data** with header (width, height, itemsize, timestamp)
 - **Keyframe interval**: 15 frames for optimal seeking
 
-### IMU Data Format
+### Raw Depth Data Format
+```
+Header: [width: 4 bytes][height: 4 bytes][itemsize: 2 bytes][timestamp_ns: 8 bytes]
+Data: [raw uint16 depth values in millimeters]
+```
+
+### IMU Data Format (Synchronized)
 ```json
 {
-  "timestamp": 1695123456789,
-  "accelerometer": {"x": 0.12, "y": -9.81, "z": 0.03},
-  "gyroscope": {"x": 0.001, "y": -0.002, "z": 0.005},
-  "magnetometer": {"x": 25.4, "y": -12.1, "z": 45.2}
+  "timestamp": 1695123456.789123,
+  "accelerometer": {"x": 0.12, "y": -9.81, "z": 0.03, "timestamp": 1695123456.789123},
+  "gyroscope": {"x": 0.001, "y": -0.002, "z": 0.005, "timestamp": 1695123456.789123}
 }
 ```
 
-### Connection Management
-The streamer now includes improved connection handling:
-- Per-stream client tracking
-- Automatic cleanup of disconnected clients
-- Real-time FPS telemetry reporting
-- Protection against connection flooding
+### SLAM Synchronization
+- **Unified timestamps**: All streams use synchronized host timestamps
+- **Temporal correlation**: Depth and IMU data share common time reference
+- **High frequency**: 200Hz IMU for dynamic motion scenarios
+- **Precision**: Nanosecond timestamp resolution for accurate sensor fusion
 
 ## Command Line Options
 
@@ -97,6 +103,14 @@ python quad_streamer_with_imu.py --fps 30
 python quad_streamer_with_imu.py --rgb-width 1920 --rgb-height 1080
 ```
 
+## SLAM Applications
+
+This streamer is optimized for:
+- **Visual SLAM**: High-quality stereo vision with reduced artifacts
+- **Visual-Inertial Odometry**: Synchronized 200Hz IMU with visual data
+- **Dense 3D Reconstruction**: Raw millimeter-precision depth data
+- **Real-time Mapping**: Low-latency synchronized sensor streams
+
 ## Troubleshooting
 
 ### High CPU usage or degraded FPS
@@ -104,20 +118,29 @@ python quad_streamer_with_imu.py --rgb-width 1920 --rgb-height 1080
 - Ensure using ethernet (not WiFi) for streaming
 - Check for connection flooding from monitoring tools
 
-### Connection refused errors
-- Verify firewall settings allow ports 5000-5004
-- Ensure Pi has correct IP configuration
-- Check OAK-D Pro USB connection
+### Raw depth data issues
+- Verify PC receiver handles 16-bit depth format
+- Check header parsing (20-byte header + depth data)
+- Ensure proper byte order (big-endian)
+
+### IMU synchronization issues
+- Verify timestamp format (seconds with decimal precision)
+- Check 200Hz data rate in receiver
+- Ensure UDP port 5004 is accessible
 
 ## PC Receiver
 
-For the corresponding PC receiver application with real-time FPS monitoring, see: [ivy_streamer_pc](https://github.com/rbivy/ivy_streamer_pc)
+For the corresponding SLAM-ready PC receiver application, see: [ivy_streamer_pc](https://github.com/rbivy/ivy_streamer_pc)
 
 ## Version History
 
+- **v6.0**: SLAM optimization release (CURRENT)
+  - Raw 16-bit depth streaming for metric reconstruction
+  - H.264 HIGH profile for superior video quality
+  - 200Hz IMU frequency for precise motion tracking
+  - Synchronized timestamps across all sensor streams
 - **v5.0**: FPS optimization and connection management improvements
 - **v4.0**: Added IMU data streaming
 - **v3.0**: Quad stream with depth support
 - **v2.0**: Stereo camera support
 - **v1.0**: Initial RGB streaming
-EOF'

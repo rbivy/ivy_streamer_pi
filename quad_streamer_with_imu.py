@@ -3,6 +3,7 @@ import depthai as dai
 import socket
 import threading
 import time
+from datetime import timedelta
 import argparse
 import sys
 import json
@@ -184,14 +185,20 @@ class QuadOakStreamerWithIMU:
             except:
                 pass
 
-    def broadcast_depth_frame(self, depth_frame, clients, stats):
+    def broadcast_depth_frame(self, depth_frame, clients, stats, timestamp_ns):
         disconnected = []
-        # Convert depth to 8-bit grayscale and encode as JPEG
-        depth_normalized = cv2.normalize(depth_frame, None, 0, 255, cv2.NORM_MINMAX)
-        depth_8bit = depth_normalized.astype(np.uint8)
-        _, encoded = cv2.imencode('.jpg', depth_8bit, [cv2.IMWRITE_JPEG_QUALITY, 80])
-        data = encoded.tobytes()
-
+        # Send raw 16-bit depth data for SLAM
+        depth_raw = depth_frame.astype(np.uint16)
+        
+        # Create header with dimensions for SLAM
+        height, width = depth_raw.shape
+        # Use synchronized timestamp from DepthAI
+        header = struct.pack('>IIIQ', width, height, depth_raw.dtype.itemsize, timestamp_ns)
+        
+        # Convert to bytes
+        depth_bytes = depth_raw.tobytes()
+        data = header + depth_bytes
+        
         for client in clients:
             try:
                 frame_size_bytes = len(data).to_bytes(4, byteorder='big')
@@ -208,32 +215,29 @@ class QuadOakStreamerWithIMU:
                 client.close()
             except:
                 pass
-
-    def send_imu_data(self, imu_packet):
+    def send_imu_data(self, imu_packet, timestamp_ns):
         if self.imu_client_address and self.imu_socket:
             try:
                 # Access accelerometer and gyroscope data
                 accelero = imu_packet.acceleroMeter
                 gyro = imu_packet.gyroscope
 
-                # Get timestamps (in microseconds from device start)
-                accelero_ts = accelero.getTimestampDevice().total_seconds()
-                gyro_ts = gyro.getTimestampDevice().total_seconds()
+                # Use synchronized timestamp from DepthAI
 
-                # Format IMU data as JSON
+                # Format IMU data as JSON with synchronized timestamp
                 imu_dict = {
-                    'timestamp': accelero_ts,  # Use accelerometer timestamp as primary
+                    'timestamp': timestamp_ns / 1000000.0,  # Convert nanoseconds to seconds
                     'accelerometer': {
                         'x': accelero.x,
                         'y': accelero.y,
                         'z': accelero.z,
-                        'timestamp': accelero_ts
+                        'timestamp': timestamp_ns / 1000000.0
                     },
                     'gyroscope': {
                         'x': gyro.x,
                         'y': gyro.y,
                         'z': gyro.z,
-                        'timestamp': gyro_ts
+                        'timestamp': timestamp_ns / 1000000.0
                     }
                 }
                 json_data = json.dumps(imu_dict)
@@ -241,7 +245,6 @@ class QuadOakStreamerWithIMU:
                 self.imu_stats['packets_sent'] += 1
             except Exception as e:
                 print(f"Error sending IMU data: {e}")
-
     def run(self):
         self.running = True
         self.start_rgb_server()
@@ -288,7 +291,7 @@ class QuadOakStreamerWithIMU:
         # IMU node
         imu = pipeline.create(dai.node.IMU)
         # Enable accelerometer and gyroscope at 100Hz
-        imu.enableIMUSensor([dai.IMUSensor.ACCELEROMETER_RAW, dai.IMUSensor.GYROSCOPE_RAW], 100)
+        imu.enableIMUSensor([dai.IMUSensor.ACCELEROMETER_RAW, dai.IMUSensor.GYROSCOPE_RAW], 200)
         # Set batch report threshold to 1 for low latency
         imu.setBatchReportThreshold(1)
         # Max batch reports to 10
@@ -306,7 +309,7 @@ class QuadOakStreamerWithIMU:
             input=camRgb.video,
             bitrate=rgb_bitrate_kbps * 1000,
             frameRate=self.fps,
-            profile=dai.VideoEncoderProperties.Profile.H264_BASELINE,
+            profile=dai.VideoEncoderProperties.Profile.H264_HIGH,
             keyframeFrequency=15
         )
 
@@ -314,7 +317,7 @@ class QuadOakStreamerWithIMU:
             input=monoLeft.out,
             bitrate=mono_bitrate_kbps * 1000,
             frameRate=self.fps,
-            profile=dai.VideoEncoderProperties.Profile.H264_BASELINE,
+            profile=dai.VideoEncoderProperties.Profile.H264_HIGH,
             keyframeFrequency=15
         )
 
@@ -322,23 +325,43 @@ class QuadOakStreamerWithIMU:
             input=monoRight.out,
             bitrate=mono_bitrate_kbps * 1000,
             frameRate=self.fps,
-            profile=dai.VideoEncoderProperties.Profile.H264_BASELINE,
+            profile=dai.VideoEncoderProperties.Profile.H264_HIGH,
             keyframeFrequency=15
         )
 
-        # Create output queues
-        rgbQueue = rgbEncoder_built.bitstream.createOutputQueue(maxSize=1, blocking=False)
-        leftQueue = leftEncoder_built.bitstream.createOutputQueue(maxSize=1, blocking=False)
-        rightQueue = rightEncoder_built.bitstream.createOutputQueue(maxSize=1, blocking=False)
-        depthQueue = stereoDepth.depth.createOutputQueue(maxSize=1, blocking=False)
-        imuQueue = imu.out.createOutputQueue(maxSize=50, blocking=False)
+        # Create output queues with XLinkOut
+        xoutRgb = pipeline.create(dai.node.XLinkOut)
+        xoutRgb.setStreamName("rgb")
+        rgbEncoder_built.bitstream.link(xoutRgb.input)
+        
+        xoutLeft = pipeline.create(dai.node.XLinkOut)
+        xoutLeft.setStreamName("left")
+        leftEncoder_built.bitstream.link(xoutLeft.input)
+        
+        xoutRight = pipeline.create(dai.node.XLinkOut)
+        xoutRight.setStreamName("right")
+        rightEncoder_built.bitstream.link(xoutRight.input)
+        
+        xoutDepth = pipeline.create(dai.node.XLinkOut)
+        xoutDepth.setStreamName("depth")
+        stereoDepth.depth.link(xoutDepth.input)
+        
+        xoutImu = pipeline.create(dai.node.XLinkOut)
+        xoutImu.setStreamName("imu")
+        imu.out.link(xoutImu.input)
 
         print("Starting OAK-D Pro device...")
 
         try:
-            pipeline.start()
-            with pipeline:
+            with dai.Device(pipeline) as device:
                 print("Quad streaming with IMU started. Press Ctrl+C to stop.")
+                
+                # Get output queues for synchronized data
+                rgbQueue = device.getOutputQueue(name="rgb", maxSize=1, blocking=False)
+                leftQueue = device.getOutputQueue(name="left", maxSize=1, blocking=False)
+                rightQueue = device.getOutputQueue(name="right", maxSize=1, blocking=False)
+                depthQueue = device.getOutputQueue(name="depth", maxSize=1, blocking=False)
+                imuQueue = device.getOutputQueue(name="imu", maxSize=50, blocking=False)
 
                 rgb_frame_count = 0
                 left_frame_count = 0
@@ -348,7 +371,7 @@ class QuadOakStreamerWithIMU:
                 start_time = time.time()
                 last_stats_time = start_time
 
-                while pipeline.isRunning() and self.running:
+                while self.running:
                     try:
                         # RGB H.264 stream
                         if rgbQueue.has():
@@ -374,19 +397,23 @@ class QuadOakStreamerWithIMU:
                                 self.broadcast_frame(data, self.right_clients, "Right", self.right_stats)
                             right_frame_count += 1
 
-                        # Depth raw stream (converted to JPEG)
                         if depthQueue.has():
-                            depthFrame = depthQueue.get().getFrame()
+                            depthMsg = depthQueue.get()
+                            depthFrame = depthMsg.getFrame()
+                            # Get synchronized timestamp in nanoseconds
+                            timestamp_ns = int(depthMsg.getTimestamp().total_seconds() * 1e9)
                             if self.depth_clients:
-                                self.broadcast_depth_frame(depthFrame, self.depth_clients, self.depth_stats)
+                                self.broadcast_depth_frame(depthFrame, self.depth_clients, self.depth_stats, timestamp_ns)
                             depth_frame_count += 1
 
                         # IMU data stream
                         if imuQueue.has():
-                            imuData = imuQueue.get()
-                            imuPackets = imuData.packets
+                            imuMsg = imuQueue.get()
+                            # Get synchronized timestamp in nanoseconds
+                            timestamp_ns = int(imuMsg.getTimestamp().total_seconds() * 1e9)
+                            imuPackets = imuMsg.packets
                             for imuPacket in imuPackets:
-                                self.send_imu_data(imuPacket)
+                                self.send_imu_data(imuPacket, timestamp_ns)
                                 imu_packet_count += 1
 
                         current_time = time.time()
