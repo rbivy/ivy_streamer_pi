@@ -302,8 +302,8 @@ class QuadOakStreamerWithIMU:
         leftEncoder = pipeline.create(dai.node.VideoEncoder)
         rightEncoder = pipeline.create(dai.node.VideoEncoder)
 
-        rgb_bitrate_kbps = 8000
-        mono_bitrate_kbps = 3000
+        rgb_bitrate_kbps = 30000
+        mono_bitrate_kbps = 8000
 
         rgbEncoder_built = rgbEncoder.build(
             input=camRgb.video,
