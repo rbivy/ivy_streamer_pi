@@ -278,13 +278,16 @@ class QuadOakStreamerWithIMU:
         monoRight.setBoardSocket(dai.CameraBoardSocket.CAM_C)
         monoRight.setResolution(dai.MonoCameraProperties.SensorResolution.THE_720_P)
 
-        # Depth node
+        # Depth node - manual config for full 720p
         stereoDepth = pipeline.create(dai.node.StereoDepth)
-        stereoDepth.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_DETAIL)
+        # Don't use preset - manually configure for full resolution
         stereoDepth.initialConfig.setMedianFilter(dai.MedianFilter.KERNEL_5x5)
         stereoDepth.setLeftRightCheck(True)
         stereoDepth.setExtendedDisparity(False)
         stereoDepth.setSubpixel(False)
+        # Explicitly set output to full input resolution
+        stereoDepth.setOutputSize(1280, 720)
+        stereoDepth.setOutputKeepAspectRatio(False)
         monoLeft.out.link(stereoDepth.left)
         monoRight.out.link(stereoDepth.right)
 
