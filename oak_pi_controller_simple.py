@@ -42,6 +42,13 @@ class SimpleOakController:
         if not os.path.exists(self.streamer_script):
             return {"success": False, "message": f"Streamer script not found: {self.streamer_script}"}
 
+        # Kill any orphaned streamer processes that we lost track of
+        try:
+            subprocess.run(['pkill', '-f', 'quad_streamer_with_imu.py'], timeout=2)
+            time.sleep(1)  # Give it time to die
+        except:
+            pass
+
         try:
             if os.path.exists(self.log_file):
                 os.remove(self.log_file)
