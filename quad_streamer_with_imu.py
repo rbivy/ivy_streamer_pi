@@ -217,27 +217,34 @@ class QuadOakStreamerWithIMU:
     def send_imu_data(self, imu_packet):
         if self.imu_client_address and self.imu_socket:
             try:
-                # Access accelerometer and gyroscope data
+                # Access accelerometer, gyroscope, and rotation vector data
                 accelero = imu_packet.acceleroMeter
                 gyro = imu_packet.gyroscope
+                rot_vec = imu_packet.rotationVector
 
-                # Use host timestamp for synchronization (Fix #2)
-                host_timestamp = time.time()
+                # Use device hardware timestamp for accurate SLAM synchronization
+                device_timestamp = accelero.timestamp.get().total_seconds()
 
-                # Format IMU data as JSON with synchronized timestamp
+                # Format IMU data as JSON with hardware timestamp
                 imu_dict = {
-                    'timestamp': host_timestamp,  # Use host timestamp for sync
+                    'timestamp': device_timestamp,  # Device hardware timestamp
                     'accelerometer': {
                         'x': accelero.x,
                         'y': accelero.y,
                         'z': accelero.z,
-                        'timestamp': host_timestamp
+                        'timestamp': device_timestamp
                     },
                     'gyroscope': {
                         'x': gyro.x,
                         'y': gyro.y,
                         'z': gyro.z,
-                        'timestamp': host_timestamp
+                        'timestamp': device_timestamp
+                    },
+                    'rotation_vector': {
+                        'i': rot_vec.i,
+                        'j': rot_vec.j,
+                        'k': rot_vec.k,
+                        'real': rot_vec.real
                     }
                 }
                 json_data = json.dumps(imu_dict)
@@ -294,7 +301,7 @@ class QuadOakStreamerWithIMU:
         # IMU node
         imu = pipeline.create(dai.node.IMU)
         # Enable accelerometer and gyroscope at 100Hz
-        imu.enableIMUSensor([dai.IMUSensor.ACCELEROMETER_RAW, dai.IMUSensor.GYROSCOPE_RAW], 200)
+        imu.enableIMUSensor([dai.IMUSensor.ACCELEROMETER_RAW, dai.IMUSensor.GYROSCOPE_RAW, dai.IMUSensor.ROTATION_VECTOR], 200)
         # Set batch report threshold to 1 for low latency
         imu.setBatchReportThreshold(1)
         # Max batch reports to 10
