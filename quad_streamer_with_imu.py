@@ -9,8 +9,12 @@ import json
 import cv2
 import numpy as np
 import struct
+import zlib
 
 class QuadOakStreamerWithIMU:
+    # Compression magic number for depth stream (matches PC receiver)
+    DEPTH_COMPRESSION_MAGIC = 0x5A4C4942  # "ZLIB" in hex
+
     def __init__(self, host="0.0.0.0", rgb_port=5000, left_port=5001, right_port=5002, depth_port=5003, imu_port=5004,
                  rgb_width=1280, rgb_height=720, mono_width=1280, mono_height=720, fps=30):
         self.host = host
@@ -184,29 +188,54 @@ class QuadOakStreamerWithIMU:
             except:
                 pass
 
-    def broadcast_depth_frame(self, depth_frame, clients, stats):
+    def broadcast_depth_frame(self, depth_frame_obj, clients, stats):
+        """
+        Broadcast depth frame with lossless zlib compression.
+
+        Protocol:
+        [4 bytes: payload_size][4 bytes: MAGIC][4 bytes: original_size][compressed_data]
+        where compressed_data contains: [20 bytes: metadata][depth_array]
+
+        Maintains exact uint16 values for SLAM (lossless compression).
+        Reduces bandwidth ~4-9x while preserving hardware timestamps.
+        """
         disconnected = []
-        # Send raw 16-bit depth data for SLAM
-        depth_raw = depth_frame.astype(np.uint16)
-        
-        # Create header with dimensions for SLAM
+
+        # Get raw 16-bit depth data for SLAM
+        depth_raw = depth_frame_obj.getFrame().astype(np.uint16)
+
+        # Get hardware timestamp from DepthAI device (same clock as IMU)
+        device_timestamp = depth_frame_obj.getTimestamp().total_seconds()
+
+        # Create metadata header with dimensions and hardware timestamp for SLAM
         height, width = depth_raw.shape
-        timestamp = time.time()  # Host timestamp for synchronization
-        header = struct.pack('>IIIQ', width, height, depth_raw.dtype.itemsize, int(timestamp * 1000000))
-        
-        # Convert to bytes
-        depth_bytes = depth_raw.tobytes()
-        data = header + depth_bytes
-        
+        metadata = struct.pack('>IIIQ', width, height, depth_raw.dtype.itemsize, int(device_timestamp * 1000000))
+
+        # Combine metadata + raw depth for compression
+        uncompressed_data = metadata + depth_raw.tobytes()
+        original_size = len(uncompressed_data)
+
+        # Compress using zlib (lossless, fast, ~4-9x reduction)
+        compressed_data = zlib.compress(uncompressed_data, level=1)  # level 1 = fast compression
+
+        # Create compressed payload: [MAGIC][original_size][compressed_data]
+        payload = struct.pack('>I', self.DEPTH_COMPRESSION_MAGIC) + struct.pack('>I', original_size) + compressed_data
+
+        # Send to all connected clients
         for client in clients:
             try:
-                frame_size_bytes = len(data).to_bytes(4, byteorder='big')
+                # Send frame size header
+                frame_size_bytes = len(payload).to_bytes(4, byteorder='big')
                 client.sendall(frame_size_bytes)
-                client.sendall(data)
+
+                # Send compressed payload
+                client.sendall(payload)
                 stats['frames_sent'] += 1
             except (socket.error, BrokenPipeError):
                 disconnected.append(client)
                 stats['frames_dropped'] += 1
+
+        # Clean up disconnected clients
         for client in disconnected:
             print(f"Depth client disconnected")
             clients.remove(client)
@@ -389,9 +418,9 @@ class QuadOakStreamerWithIMU:
 
                         # Depth raw stream (converted to JPEG)
                         if depthQueue.has():
-                            depthFrame = depthQueue.get().getFrame()
+                            depthFrameObj = depthQueue.get()
                             if self.depth_clients:
-                                self.broadcast_depth_frame(depthFrame, self.depth_clients, self.depth_stats)
+                                self.broadcast_depth_frame(depthFrameObj, self.depth_clients, self.depth_stats)
                             depth_frame_count += 1
 
                         # IMU data stream
