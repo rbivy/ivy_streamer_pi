@@ -15,6 +15,9 @@ class QuadOakStreamerWithIMU:
     # Compression magic number for depth stream (matches PC receiver)
     DEPTH_COMPRESSION_MAGIC = 0x5A4C4942  # "ZLIB" in hex
 
+    # IMU protocol magic number for binary format detection
+    IMU_BINARY_MAGIC = 0x494D5542  # "IMUB" in hex (IMU Binary)
+
     def __init__(self, host="0.0.0.0", rgb_port=5000, left_port=5001, right_port=5002, depth_port=5003, imu_port=5004,
                  rgb_width=1280, rgb_height=720, mono_width=1280, mono_height=720, fps=30):
         self.host = host
@@ -29,6 +32,9 @@ class QuadOakStreamerWithIMU:
         self.mono_height = mono_height
         self.fps = fps
         self.running = False
+
+        # IMU packet sequence counter for loss detection
+        self.imu_sequence = 0
 
         # Separate client lists for each stream
         self.rgb_clients = []
@@ -254,31 +260,28 @@ class QuadOakStreamerWithIMU:
                 # Use device hardware timestamp for accurate SLAM synchronization
                 device_timestamp = accelero.timestamp.get().total_seconds()
 
-                # Format IMU data as JSON with hardware timestamp
-                imu_dict = {
-                    'timestamp': device_timestamp,  # Device hardware timestamp
-                    'accelerometer': {
-                        'x': accelero.x,
-                        'y': accelero.y,
-                        'z': accelero.z,
-                        'timestamp': device_timestamp
-                    },
-                    'gyroscope': {
-                        'x': gyro.x,
-                        'y': gyro.y,
-                        'z': gyro.z,
-                        'timestamp': device_timestamp
-                    },
-                    'rotation_vector': {
-                        'i': rot_vec.i,
-                        'j': rot_vec.j,
-                        'k': rot_vec.k,
-                        'real': rot_vec.real
-                    }
-                }
-                json_data = json.dumps(imu_dict)
-                self.imu_socket.sendto(json_data.encode(), self.imu_client_address)
+                # Get rotation vector accuracy from BNO085 (in radians)
+                # This represents the sensor's confidence in the orientation estimate
+                accuracy = rot_vec.accuracy  # rad, typically 0.01-0.1 rad (0.5-5 degrees)
+
+                # Binary protocol format (75 bytes total):
+                # [4B magic][4B sequence][8B timestamp][12B accel][12B gyro][16B quat][4B accuracy]
+                binary_data = struct.pack(
+                    '>IIdfffffffffff',  # Big-endian format
+                    self.IMU_BINARY_MAGIC,  # Magic number for protocol detection
+                    self.imu_sequence,      # Packet sequence number
+                    device_timestamp,       # Device timestamp (double, 8 bytes)
+                    accelero.x, accelero.y, accelero.z,  # Accelerometer (3 floats)
+                    gyro.x, gyro.y, gyro.z,              # Gyroscope (3 floats)
+                    rot_vec.i, rot_vec.j, rot_vec.k, rot_vec.real,  # Quaternion (4 floats)
+                    accuracy                # Rotation vector accuracy (float)
+                )
+
+                # Send binary packet
+                self.imu_socket.sendto(binary_data, self.imu_client_address)
                 self.imu_stats['packets_sent'] += 1
+                self.imu_sequence += 1  # Increment sequence for next packet
+
             except Exception as e:
                 print(f"Error sending IMU data: {e}")
     def run(self):
