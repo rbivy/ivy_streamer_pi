@@ -301,6 +301,66 @@ class QuadOakStreamerWithIMU:
                 client.close()
             except:
                 pass
+
+    def broadcast_stereo_frame(self, frame_obj, clients, stream_name, stats):
+        """
+        Broadcast raw mono8 stereo frame with hardware timestamp for SLAM.
+
+        Protocol:
+        [4 bytes: payload_size][16 bytes: metadata][raw_mono8_data]
+
+        Metadata format (16 bytes):
+        - width (4 bytes, uint32)
+        - height (4 bytes, uint32)
+        - timestamp_us (8 bytes, uint64) - hardware timestamp in microseconds
+
+        Raw data is uncompressed mono8 for maximum SLAM quality.
+        Hardware timestamps synchronized with IMU and depth.
+        """
+        disconnected = []
+
+        try:
+            # Get raw mono8 frame data (same API as depth frames)
+            frame_raw = frame_obj.getFrame()  # Returns numpy array (H, W) uint8
+
+            # Get hardware timestamp from DepthAI device (same clock as IMU/Depth)
+            device_timestamp = frame_obj.getTimestamp().total_seconds()
+            timestamp_us = int(device_timestamp * 1000000)
+
+            # Create metadata header with dimensions and hardware timestamp
+            height, width = frame_raw.shape
+            metadata = struct.pack('>IIQ', width, height, timestamp_us)
+
+            # Create payload: metadata + raw frame data
+            payload = metadata + frame_raw.tobytes()
+        except Exception as e:
+            print(f"Error creating {stream_name} stereo frame payload: {e}")
+            print(f"Frame object type: {type(frame_obj)}")
+            print(f"Frame object dir: {[m for m in dir(frame_obj) if not m.startswith('_')]}")
+            return
+
+        # Send to all connected clients
+        for client in clients:
+            try:
+                # Send frame size header
+                frame_size_bytes = len(payload).to_bytes(4, byteorder='big')
+                client.sendall(frame_size_bytes)
+
+                # Send payload
+                client.sendall(payload)
+                stats['frames_sent'] += 1
+            except (socket.error, BrokenPipeError):
+                disconnected.append(client)
+                stats['frames_dropped'] += 1
+
+        # Clean up disconnected clients
+        for client in disconnected:
+            print(f"{stream_name} client disconnected")
+            clients.remove(client)
+            try:
+                client.close()
+            except:
+                pass
     def send_imu_data(self, imu_packet):
         if self.imu_client_address and self.imu_socket:
             try:
@@ -359,17 +419,22 @@ class QuadOakStreamerWithIMU:
         camRgb = pipeline.create(dai.node.ColorCamera)
         camRgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
         camRgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
-        camRgb.setVideoSize(1280, 720)  # Full 1080p output - PC scales to 720p
+        # Use ISP scaling instead of cropping to maintain full FOV (66° HFOV)
+        # 1920×1080 → 1280×720: scale by 2/3 (maintains aspect ratio and FOV)
+        camRgb.setIspScale(2, 3)  # numerator=2, denominator=3 (downscale factor)
+        camRgb.setVideoSize(1280, 720)
         camRgb.setFps(self.fps)
 
         # Mono cameras
         monoLeft = pipeline.create(dai.node.MonoCamera)
         monoLeft.setBoardSocket(dai.CameraBoardSocket.CAM_B)
         monoLeft.setResolution(dai.MonoCameraProperties.SensorResolution.THE_720_P)
+        monoLeft.setFps(self.fps)
 
         monoRight = pipeline.create(dai.node.MonoCamera)
         monoRight.setBoardSocket(dai.CameraBoardSocket.CAM_C)
         monoRight.setResolution(dai.MonoCameraProperties.SensorResolution.THE_720_P)
+        monoRight.setFps(self.fps)
 
         # Depth node - manual config for full 720p
         stereoDepth = pipeline.create(dai.node.StereoDepth)
@@ -393,13 +458,10 @@ class QuadOakStreamerWithIMU:
         # Max batch reports to 10
         imu.setMaxBatchReports(10)
 
-        # Encoders for RGB, Left, Right
+        # Encoder for RGB only (stereo cameras send raw for SLAM)
         rgbEncoder = pipeline.create(dai.node.VideoEncoder)
-        leftEncoder = pipeline.create(dai.node.VideoEncoder)
-        rightEncoder = pipeline.create(dai.node.VideoEncoder)
 
-        rgb_bitrate_kbps = 30000
-        mono_bitrate_kbps = 8000
+        rgb_bitrate_kbps = 20000  # Increased from 12000 for better quality with raw stereo streams
 
         rgbEncoder_built = rgbEncoder.build(
             input=camRgb.video,
@@ -409,27 +471,13 @@ class QuadOakStreamerWithIMU:
             keyframeFrequency=15
         )
 
-        leftEncoder_built = leftEncoder.build(
-            input=monoLeft.out,
-            bitrate=mono_bitrate_kbps * 1000,
-            frameRate=self.fps,
-            profile=dai.VideoEncoderProperties.Profile.H264_HIGH,
-            keyframeFrequency=15
-        )
-
-        rightEncoder_built = rightEncoder.build(
-            input=monoRight.out,
-            bitrate=mono_bitrate_kbps * 1000,
-            frameRate=self.fps,
-            profile=dai.VideoEncoderProperties.Profile.H264_HIGH,
-            keyframeFrequency=15
-        )
-
         # Create output queues
-        rgbQueue = rgbEncoder_built.bitstream.createOutputQueue(maxSize=1, blocking=False)
-        leftQueue = leftEncoder_built.bitstream.createOutputQueue(maxSize=1, blocking=False)
-        rightQueue = rightEncoder_built.bitstream.createOutputQueue(maxSize=1, blocking=False)
-        depthQueue = stereoDepth.depth.createOutputQueue(maxSize=1, blocking=False)
+        # RGB: H.264 encoded bitstream (increased buffer for higher bitrate)
+        # Left/Right: Raw mono8 frames for SLAM (no encoding)
+        rgbQueue = rgbEncoder_built.bitstream.createOutputQueue(maxSize=4, blocking=False)
+        leftQueue = monoLeft.out.createOutputQueue(maxSize=4, blocking=False)
+        rightQueue = monoRight.out.createOutputQueue(maxSize=4, blocking=False)
+        depthQueue = stereoDepth.depth.createOutputQueue(maxSize=4, blocking=False)
         imuQueue = imu.out.createOutputQueue(maxSize=50, blocking=False)
 
         print("Starting OAK-D Pro device...")
@@ -467,20 +515,18 @@ class QuadOakStreamerWithIMU:
                                     self.broadcast_frame(data, self.rgb_clients, "RGB", self.rgb_stats)
                             rgb_frame_count += 1
 
-                        # Left H.264 stream
+                        # Left raw mono8 stream (for SLAM)
                         if leftQueue.has():
-                            h264Packet = leftQueue.get()
-                            data = h264Packet.getData()
+                            leftFrame = leftQueue.get()
                             if self.left_clients:
-                                self.broadcast_frame(data, self.left_clients, "Left", self.left_stats)
+                                self.broadcast_stereo_frame(leftFrame, self.left_clients, "Left", self.left_stats)
                             left_frame_count += 1
 
-                        # Right H.264 stream
+                        # Right raw mono8 stream (for SLAM)
                         if rightQueue.has():
-                            h264Packet = rightQueue.get()
-                            data = h264Packet.getData()
+                            rightFrame = rightQueue.get()
                             if self.right_clients:
-                                self.broadcast_frame(data, self.right_clients, "Right", self.right_stats)
+                                self.broadcast_stereo_frame(rightFrame, self.right_clients, "Right", self.right_stats)
                             right_frame_count += 1
 
                         # Depth raw stream (converted to JPEG)
