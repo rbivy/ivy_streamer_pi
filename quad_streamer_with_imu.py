@@ -19,19 +19,24 @@ class QuadOakStreamerWithIMU:
     IMU_BINARY_MAGIC = 0x494D5542  # "IMUB" in hex (IMU Binary)
 
     def __init__(self, host="0.0.0.0", rgb_port=5000, left_port=5001, right_port=5002, depth_port=5003, imu_port=5004,
-                 rgb_width=1280, rgb_height=720, mono_width=1280, mono_height=720, fps=30):
+                 rgb_width=1280, rgb_height=720, mono_width=1280, mono_height=720, fps=30, rgb_ts_port=5005):
         self.host = host
         self.rgb_port = rgb_port
         self.left_port = left_port
         self.right_port = right_port
         self.depth_port = depth_port
         self.imu_port = imu_port
+        self.rgb_ts_port = rgb_ts_port
         self.rgb_width = rgb_width
         self.rgb_height = rgb_height
         self.mono_width = mono_width
         self.mono_height = mono_height
         self.fps = fps
         self.running = False
+        self.use_rgb_timestamp_protocol = False
+        self.rgb_sequence = 0
+        self.rgb_ts_socket = None
+        self.rgb_ts_client_address = None
 
         # IMU packet sequence counter for loss detection
         self.imu_sequence = 0
@@ -114,6 +119,53 @@ class QuadOakStreamerWithIMU:
             except Exception as e:
                 if self.running:
                     print(f"Error in IMU listener: {e}")
+
+    def start_rgb_timestamp_server(self):
+        self.rgb_ts_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.rgb_ts_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.rgb_ts_socket.bind((self.host, self.rgb_ts_port))
+        print(f"RGB Timestamp UDP server listening on {self.host}:{self.rgb_ts_port}")
+        threading.Thread(target=self.listen_for_rgb_ts_client, daemon=True).start()
+
+    def listen_for_rgb_ts_client(self):
+        while self.running:
+            try:
+                self.rgb_ts_socket.settimeout(1.0)
+                data, addr = self.rgb_ts_socket.recvfrom(1024)
+                if data == b'REGISTER_RGB_TS':
+                    self.rgb_ts_client_address = addr
+                    print(f"RGB Timestamp client registered from {addr}")
+                    self.rgb_ts_socket.sendto(b'RGB_TS_ACK', addr)
+            except socket.timeout:
+                continue
+            except Exception as e:
+                if self.running:
+                    print(f"Error in RGB TS listener: {e}")
+
+    def send_rgb_timestamp(self, sequence, timestamp):
+        if self.rgb_ts_client_address and self.rgb_ts_socket:
+            try:
+                binary_data = struct.pack('>IdI', sequence, timestamp, 0)
+                self.rgb_ts_socket.sendto(binary_data, self.rgb_ts_client_address)
+            except Exception as e:
+                print(f"Error sending RGB timestamp: {e}")
+
+    def broadcast_frame_with_sequence(self, data, clients, stream_name, stats, sequence):
+        disconnected = []
+        for client in clients:
+            try:
+                header = struct.pack('>II', sequence, len(data))
+                client.sendall(header + data)
+                stats['frames_sent'] += 1
+            except (socket.error, BrokenPipeError):
+                disconnected.append(client)
+                stats['frames_dropped'] += 1
+        for client in disconnected:
+            clients.remove(client)
+            try:
+                client.close()
+            except:
+                pass
 
     def accept_rgb_clients(self):
         while self.running:
@@ -291,6 +343,8 @@ class QuadOakStreamerWithIMU:
         self.start_right_server()
         self.start_depth_server()
         self.start_imu_server()
+        if self.use_rgb_timestamp_protocol:
+            self.start_rgb_timestamp_server()
 
         print(f"Setting up OAK-D Pro quad pipeline with depth and IMU:")
         print(f"  RGB: {self.rgb_width}x{self.rgb_height} @ {self.fps}fps")
@@ -400,7 +454,17 @@ class QuadOakStreamerWithIMU:
                             h264Packet = rgbQueue.get()
                             data = h264Packet.getData()
                             if self.rgb_clients:
-                                self.broadcast_frame(data, self.rgb_clients, "RGB", self.rgb_stats)
+                                if self.use_rgb_timestamp_protocol:
+                                    # New protocol: send timestamp via UDP, frame with sequence via TCP
+                                    # CRITICAL: Capture sequence BEFORE sending to ensure both use same sequence
+                                    current_seq = self.rgb_sequence
+                                    timestamp = h264Packet.getTimestamp().total_seconds()
+                                    self.send_rgb_timestamp(current_seq, timestamp)
+                                    self.broadcast_frame_with_sequence(data, self.rgb_clients, "RGB", self.rgb_stats, current_seq)
+                                    self.rgb_sequence += 1
+                                else:
+                                    # Legacy protocol: just send frame
+                                    self.broadcast_frame(data, self.rgb_clients, "RGB", self.rgb_stats)
                             rgb_frame_count += 1
 
                         # Left H.264 stream
@@ -480,7 +544,7 @@ class QuadOakStreamerWithIMU:
                     client.close()
                 except:
                     pass
-        for socket_obj in [self.rgb_server_socket, self.left_server_socket, self.right_server_socket, self.depth_server_socket, self.imu_socket]:
+        for socket_obj in [self.rgb_server_socket, self.left_server_socket, self.right_server_socket, self.depth_server_socket, self.imu_socket, self.rgb_ts_socket]:
             if socket_obj:
                 try:
                     socket_obj.close()
@@ -491,9 +555,13 @@ class QuadOakStreamerWithIMU:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='OAK-D Pro Quad Streamer with Depth and IMU')
     parser.add_argument('--fps', type=int, default=30, help='FPS (default: 30)')
+    parser.add_argument('--use-rgb-timestamp-protocol', action='store_true',
+                        help='Enable RGB timestamp protocol (UDP timestamps + TCP frames with sequence numbers)')
     args = parser.parse_args()
 
     streamer = QuadOakStreamerWithIMU(fps=args.fps)
+    if args.use_rgb_timestamp_protocol:
+        streamer.use_rgb_timestamp_protocol = True
     try:
         streamer.run()
     except KeyboardInterrupt:

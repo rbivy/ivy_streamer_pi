@@ -35,7 +35,7 @@ class SimpleOakController:
             self.streamer_process = None
             return False
 
-    def start_streamer(self):
+    def start_streamer(self, use_rgb_timestamp_protocol=False, config=None):
         if self.is_streamer_running():
             return {"success": False, "message": f"Streamer already running (PID: {self.streamer_process.pid})"}
 
@@ -53,7 +53,32 @@ class SimpleOakController:
             if os.path.exists(self.log_file):
                 os.remove(self.log_file)
 
-            cmd = f'source {self.venv_activate} && python3 {self.streamer_script} > {self.log_file} 2>&1'
+            cmd = f'source {self.venv_activate} && python3 {self.streamer_script}'
+            if use_rgb_timestamp_protocol:
+                cmd += ' --use-rgb-timestamp-protocol'
+
+            # Add config parameters if provided
+            if config:
+                if 'rgb_port' in config:
+                    cmd += f' --rgb-port {config["rgb_port"]}'
+                if 'left_port' in config:
+                    cmd += f' --left-port {config["left_port"]}'
+                if 'right_port' in config:
+                    cmd += f' --right-port {config["right_port"]}'
+                if 'depth_port' in config:
+                    cmd += f' --depth-port {config["depth_port"]}'
+                if 'imu_port' in config:
+                    cmd += f' --imu-port {config["imu_port"]}'
+                if 'rgb_timestamp_port' in config:
+                    cmd += f' --rgb-timestamp-port {config["rgb_timestamp_port"]}'
+                if 'fps' in config:
+                    cmd += f' --fps {config["fps"]}'
+                if 'rgb_width' in config and 'rgb_height' in config:
+                    cmd += f' --rgb-resolution {config["rgb_width"]}x{config["rgb_height"]}'
+                if 'mono_width' in config and 'mono_height' in config:
+                    cmd += f' --mono-resolution {config["mono_width"]}x{config["mono_height"]}'
+
+            cmd += f' > {self.log_file} 2>&1'
 
             self.streamer_process = subprocess.Popen(
                 cmd,
@@ -135,19 +160,35 @@ class SimpleOakController:
 
     def handle_client(self, client_socket):
         try:
-            data = client_socket.recv(1024).decode()
+            data = client_socket.recv(4096).decode()  # Increased buffer for config
             command = data.strip()
 
-            if command == "START":
-                response = self.start_streamer()
-            elif command == "STOP":
-                response = self.stop_streamer()
-            elif command == "STATUS":
-                response = self.get_status()
-            elif command == "HEARTBEAT":
-                response = self.get_status()
-            else:
-                response = {"success": False, "message": f"Unknown command: {command}"}
+            # Try to parse as JSON for START_WITH_CONFIG
+            try:
+                cmd_data = json.loads(command)
+                if isinstance(cmd_data, dict) and 'command' in cmd_data:
+                    if cmd_data['command'] == 'START_WITH_CONFIG':
+                        config = cmd_data.get('config', {})
+                        use_rgb_ts = cmd_data.get('use_rgb_timestamp_protocol', False)
+                        response = self.start_streamer(use_rgb_timestamp_protocol=use_rgb_ts, config=config)
+                    else:
+                        response = {"success": False, "message": f"Unknown JSON command: {cmd_data['command']}"}
+                else:
+                    response = {"success": False, "message": "Invalid JSON command format"}
+            except json.JSONDecodeError:
+                # Fallback to simple string commands
+                if command == "START":
+                    response = self.start_streamer()
+                elif command == "START_RGB_TIMESTAMP":
+                    response = self.start_streamer(use_rgb_timestamp_protocol=True)
+                elif command == "STOP":
+                    response = self.stop_streamer()
+                elif command == "STATUS":
+                    response = self.get_status()
+                elif command == "HEARTBEAT":
+                    response = self.get_status()
+                else:
+                    response = {"success": False, "message": f"Unknown command: {command}"}
 
             client_socket.sendall(json.dumps(response).encode())
 
