@@ -443,6 +443,9 @@ class QuadOakStreamerWithIMU:
         stereoDepth.setLeftRightCheck(True)
         stereoDepth.setExtendedDisparity(False)
         stereoDepth.setSubpixel(False)
+        # CRITICAL: Align depth map to RGB camera (CAM_A) for SLAM
+        # This ensures depth matches RGB perspective and intrinsics
+        stereoDepth.setDepthAlign(dai.CameraBoardSocket.CAM_A)
         # Explicitly set output to full input resolution
         stereoDepth.setOutputSize(1280, 720)
         stereoDepth.setOutputKeepAspectRatio(False)
